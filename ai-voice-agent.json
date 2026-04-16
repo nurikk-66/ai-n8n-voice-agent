@@ -1,0 +1,332 @@
+{
+  "name": "AI Voice Agent Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "voice-webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "VAPI Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "voice-agent-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst eventType = body.message?.type || body.type || 'unknown';\nconst callId = body.message?.call?.id || body.call?.id || 'unknown';\nconst transcript = body.message?.transcript || body.transcript || '';\nconst callerPhone = body.message?.call?.customer?.number || body.call?.customer?.number || 'unknown';\nconst callStatus = body.message?.call?.status || body.call?.status || 'unknown';\n\nreturn [{\n  json: {\n    eventType,\n    callId,\n    transcript,\n    callerPhone,\n    callStatus,\n    timestamp: new Date().toISOString(),\n    rawBody: body\n  }\n}];"
+      },
+      "id": "parse-call",
+      "name": "Parse Call Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "end-of-call",
+              "leftValue": "={{ $json.eventType }}",
+              "rightValue": "end-of-call-report",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-event",
+      "name": "End of Call?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "You are a sales analyst. Analyze this call transcript and extract lead information. Return ONLY a valid JSON object with these fields: caller_intent (what they wanted), lead_quality (hot/warm/cold), key_info (main points discussed), next_action (what to do next), appointment_requested (true/false), follow_up_message (a personalized SMS to send). No markdown, no explanation.",
+              "role": "system"
+            },
+            {
+              "content": "=Call transcript:\n{{ $json.transcript }}\n\nCaller phone: {{ $json.callerPhone }}\n\nAnalyze and return JSON."
+            }
+          ]
+        },
+        "options": {
+          "maxTokens": 500
+        }
+      },
+      "id": "ai-analysis",
+      "name": "AI Call Analysis",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1,
+      "position": [900, 200],
+      "credentials": {
+        "openAiApi": {
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const aiText = $input.first().json.message?.content || '{}';\nlet analysis = {};\n\ntry {\n  analysis = JSON.parse(aiText);\n} catch(e) {\n  analysis = {\n    caller_intent: 'Unknown',\n    lead_quality: 'warm',\n    key_info: 'Call analyzed',\n    next_action: 'Follow up',\n    appointment_requested: false,\n    follow_up_message: 'Thank you for calling! We will be in touch soon.'\n  };\n}\n\nconst callData = $('Parse Call Data').first().json;\n\nreturn [{\n  json: {\n    callId: callData.callId,\n    callerPhone: callData.callerPhone,\n    timestamp: callData.timestamp,\n    caller_intent: analysis.caller_intent,\n    lead_quality: analysis.lead_quality,\n    key_info: analysis.key_info,\n    next_action: analysis.next_action,\n    appointment_requested: analysis.appointment_requested,\n    follow_up_message: analysis.follow_up_message\n  }\n}];"
+      },
+      "id": "parse-analysis",
+      "name": "Parse Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Calls",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Call_ID": "={{ $json.callId }}",
+            "Phone": "={{ $json.callerPhone }}",
+            "Intent": "={{ $json.caller_intent }}",
+            "Lead_Quality": "={{ $json.lead_quality }}",
+            "Key_Info": "={{ $json.key_info }}",
+            "Next_Action": "={{ $json.next_action }}",
+            "Appointment": "={{ $json.appointment_requested }}",
+            "Timestamp": "={{ $json.timestamp }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "log-to-sheets",
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1340, 200],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "hot-lead",
+              "leftValue": "={{ $json.lead_quality }}",
+              "rightValue": "hot",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-lead-quality",
+      "name": "Hot Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://api.twilio.com/2010-04-01/Accounts/YOUR_ACCOUNT_SID/Messages.json",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Basic YOUR_TWILIO_AUTH_BASE64"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "To",
+              "value": "={{ $json.callerPhone }}"
+            },
+            {
+              "name": "From",
+              "value": "YOUR_TWILIO_PHONE_NUMBER"
+            },
+            {
+              "name": "Body",
+              "value": "={{ $json.follow_up_message }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "send-sms",
+      "name": "Send Follow-up SMS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1780, 100]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"received\", \"callId\": \"{{ $('Parse Call Data').first().json.callId }}\"}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-webhook",
+      "name": "Respond to VAPI",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [900, 420]
+    }
+  ],
+  "connections": {
+    "VAPI Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Call Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Call Data": {
+      "main": [
+        [
+          {
+            "node": "End of Call?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "End of Call?": {
+      "main": [
+        [
+          {
+            "node": "AI Call Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to VAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Call Analysis": {
+      "main": [
+        [
+          {
+            "node": "Parse Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Analysis": {
+      "main": [
+        [
+          {
+            "node": "Log to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Hot Lead?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hot Lead?": {
+      "main": [
+        [
+          {
+            "node": "Send Follow-up SMS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": {
+    "instanceId": "ai-voice-agent-v1"
+  },
+  "pinData": {},
+  "tags": [
+    {
+      "name": "AI",
+      "createdAt": "2026-04-17T00:00:00.000Z"
+    },
+    {
+      "name": "Voice",
+      "createdAt": "2026-04-17T00:00:00.000Z"
+    },
+    {
+      "name": "VAPI",
+      "createdAt": "2026-04-17T00:00:00.000Z"
+    }
+  ]
+}
